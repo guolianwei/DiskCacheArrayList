@@ -1,29 +1,26 @@
-package mcparallelprocess.util;
+import static org.junit.Assert.assertEquals;
 
-import java.nio.ByteBuffer;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
-public class ByteUtil {
-	// 浮点到字节转换
-	public static byte[] doubleToByte(double d) {
-		byte[] bytes = new byte[8];
-		ByteBuffer.wrap(bytes).putDouble(d);
-		return bytes;
-	}
+import com.merit.hugedata.ByteUtil;
 
-	// 字节到浮点转换
-	public static double byteToDouble(byte[] b) {
-		return ByteBuffer.wrap(b).getDouble();
-	}
+public class ByteUtilTest {
 
-	// 整数到字节数组的转换
-	public static byte[] intToByte(int number) {
-		byte[] bytes = new byte[4];
-		ByteBuffer.wrap(bytes).putInt(number);
-		return bytes;
-	}
+ @BeforeClass
+ public static void setUpBeforeClass() throws Exception {
+ }
 
-	// 字节数组到整数的转换
-	public static int byteToInt(byte[] b) {
-		return ByteBuffer.wrap(b).getInt();
-	}
+ @Before
+ public void setUp() throws Exception {
+ }
+
+ @Test
+ public void unsingedByteToIntTest() {
+  for (int i = 0; i < 255; i++) {
+   int v = ByteUtil.unsingedByteToInt(ByteUtil.intToUnsingedByte(i));
+   assertEquals(v, i);
+  }
+ }
 }

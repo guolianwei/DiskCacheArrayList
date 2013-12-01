@@ -3,41 +3,47 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
+import java.nio.DoubleBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
+
+import org.apache.log4j.Logger;
+
 /**
  * 基于磁盘的ArrayList
  *
- * @author 郭联伟
+ * @author guolw
  *
- * @param 
- *            待增加项
  */
 public class DiskCacheArrayList implements List {
  private RandomAccessFile diskCacheFile;
+ private static Logger log = Logger.getLogger(DiskCacheArrayList.class);
  /**
   * 在内存中存储的数据项个数
   */
  private int inMemoryElements;
  /**
-  * 内存列表
+  * 头部内存对象列表
   */
- private ArrayList inMemroyList;
- 
+ private ArrayList inMemHeadList;
+
+
+
  /**
-  * 数据写入磁盘前前的缓存
+  * 数据写入磁盘前的列表缓存
   */
- private ArrayList tailBuffer;
- 
+ private ArrayList inMemTailList;
+
  /**
   * 写入磁盘前缓存的数据项个数，默认为“内存中存储的数据项个数”的1/3
   */
- private int tailBufferSize;
- 
+ private int tailArraySize;
+
  /**
   * 当前列表包含的数据项总数
   */
@@ -62,30 +68,32 @@ public class DiskCacheArrayList implements List {
  /**
   * 在文件数据操作时的缓冲区记录数
   */
- public static int OprateBufferRecordsNumber = 1000;
+ public static int OprateBufferRecordsNumber = 10000;
+
  /**
   * 不支持单行记录数超过1M的数据
   *
   * @param bigArrayReaderWriter
-  * @param inMemoryElements
+  * @param inMemoryElementsP
   * @throws FileNotFoundException
   */
  public DiskCacheArrayList(ElementArrayReaderWriter bigArrayReaderWriter,
-   int inMemoryElements) throws FileNotFoundException {
+   int inMemoryElementsP) throws FileNotFoundException {
   elementArrayReaderWriter = bigArrayReaderWriter;
   if (elementArrayReaderWriter.elementByteSize() > (1024 * 1024)) {
    throw new IllegalArgumentException(
      "can't support 1M bytes per Record!");
   }
-  this.inMemoryElements = inMemoryElements;
-  inMemroyList = new ArrayList(inMemoryElements);
-  tailBufferSize=inMemoryElements/3;
-  tailBuffer = new ArrayList(tailBufferSize);
+  tailArraySize = inMemoryElementsP / 3;
+  inMemoryElements = inMemoryElementsP - tailArraySize;
+  inMemHeadList = new ArrayList(inMemoryElements);
+  inMemTailList = new ArrayList(tailArraySize);
   oneElementByteSize = this.elementArrayReaderWriter.elementByteSize();
   ID = java.util.UUID.randomUUID().toString();
   tempFilePath = ID + ".array";
   createFile();
  }
+
  /**
   * Checks if the given index is in range. If not, throws an appropriate
   * runtime exception. This method does *not* check if the index is negative:
@@ -97,31 +105,38 @@ public class DiskCacheArrayList implements List {
    throw new IndexOutOfBoundsException("Index: " + index + ", Size: "
      + size);
  }
+
  @Override
  public int size() {
   return size;
  }
+
  @Override
  public boolean isEmpty() {
   // TODO Auto-generated method stub
   return false;
  }
+
  @Override
  public boolean contains(Object o) {
   return false;
  }
+
  @Override
  public Iterator iterator() {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public Object[] toArray() {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public T[] toArray(T[] a) {
   throw new IllegalArgumentException("Not supported");
  }
+
  /**
   * 追加
   *
@@ -130,30 +145,39 @@ public class DiskCacheArrayList implements List {
  @Override
  public boolean add(E e) {
   if (size < this.inMemoryElements) {
-   inMemroyList.add(e);
-   size = inMemroyList.size();
+   inMemHeadList.add(e);
+   size = inMemHeadList.size();
    return true;
   }
-  try {
-   ByteBuffer buf = ByteBuffer.allocate(oneElementByteSize);
-   buf.clear();
-   elementArrayReaderWriter.write(e, buf);
-   buf.flip();
-   if (buf.array().length > 0) {
-    while (buf.hasRemaining()) {
-     fc.write(buf);
-    }
-    size++;
+  if (inMemTailList.size() >= this.tailArraySize) {
+   try {
+    flushTail();
+   } catch (IOException e1) {
+    log.error("IOException", e1);
+    return false;
    }
-  } catch (IOException ex) {
-   ex.printStackTrace();
-   return false;
   }
+  inMemTailList.add(e);
+  size++;
+
   return true;
  }
-    private void addToTailBuffer(E elment){
-     tailBuffer.add(elment);
-    }
+
+ private void flushTail() throws IOException {
+  ByteBuffer buf = ByteBuffer.allocate(inMemTailList.size()
+    * oneElementByteSize);
+  for (int i = 0; i < inMemTailList.size(); i++) {
+   elementArrayReaderWriter.writeToBuffer(inMemTailList.get(i), buf);
+  }
+  buf.flip();
+  if (buf.array().length > 0) {
+   while (buf.hasRemaining()) {
+    fc.write(buf);
+   }
+  }
+  inMemTailList.clear();
+ }
+
  /**
   * 不支持该操作
   *
@@ -163,91 +187,112 @@ public class DiskCacheArrayList implements List {
  public boolean remove(Object o) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public boolean containsAll(Collection c) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public boolean addAll(Collection c) {
   // TODO Auto-generated method stub
   return false;
  }
+
  @Override
  public boolean addAll(int index, Collection c) {
   // TODO Auto-generated method stub
   return false;
  }
+
  @Override
  public boolean removeAll(Collection c) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public boolean retainAll(Collection c) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public void clear() {
   size = 0;
-  this.inMemroyList.clear();
+  this.inMemHeadList.clear();
+  this.inMemTailList.clear();
   try {
    deleteFile();
    createFile();
   } catch (IOException e) {
-   // TODO Auto-generated catch block
-   e.printStackTrace();
+   log.error("IOException", e);
   }
  }
+
  @Override
  public E get(int index) {
   RangeCheck(index);
-  if (index < this.inMemroyList.size()) {
-   return this.inMemroyList.get(index);
+  if (index < this.inMemHeadList.size()) {
+   return this.inMemHeadList.get(index);
+  } else if (index >= (size - this.inMemTailList.size())) {
+   int indexTail = index - (size - this.inMemTailList.size());
+   return this.inMemTailList.get(indexTail);
   }
   try {
-   long getPos = (long) (index - this.inMemroyList.size())
+   long getPos = (long) (index - this.inMemHeadList.size())
      * (long) this.elementArrayReaderWriter.elementByteSize();
    ByteBuffer buf = ByteBuffer.allocate(oneElementByteSize);
    fc.read(buf, getPos);
-   return elementArrayReaderWriter.read(buf);
+   return elementArrayReaderWriter.readFromBuffer(buf);
   } catch (IOException e) {
-   // TODO Auto-generated catch block
-   e.printStackTrace();
+   log.error("IOException", e);
   }
   return null;
  }
+
  @Override
  public E set(int index, E element) {
   RangeCheck(index);
-  if (index < this.inMemroyList.size()) {
-   return this.inMemroyList.set(index, element);
+  if (index < this.inMemHeadList.size()) {
+   return this.inMemHeadList.set(index, element);
+  } else if (index >= size - this.inMemTailList.size()) {
+   int indexTail = index - (size - this.inMemTailList.size());
+   return this.inMemTailList.set(indexTail, element);
   }
   // 从文件中读取当前记录，需要根据Position进行位置计算。
-  long pos = (long) (index - this.inMemroyList.size())
+  long pos = (long) (index - this.inMemHeadList.size())
     * (long) elementArrayReaderWriter.elementByteSize();
   ByteBuffer buf = ByteBuffer.allocate(oneElementByteSize);
-  elementArrayReaderWriter.write(element, buf);
   try {
+   elementArrayReaderWriter.writeToBuffer(element, buf);
    buf.flip();
    fc.write(buf, pos);
   } catch (IOException e) {
-   // TODO Auto-generated catch block
-   e.printStackTrace();
+   log.error("IOException", e);
    return null;
   }
   return element;
  }
+
  @Override
  public void add(int index, E element) {
+
  }
+
  @Override
  public E remove(int index) {
   RangeCheck(index);
-  if (index < this.inMemroyList.size()) {
-   return removeInMemory(index);
+  if (index < this.inMemHeadList.size()) {
+   return removeInHeadList(index);
+  } else if (index >= (size - this.inMemTailList.size())) {
+   int tailIndex = index - (size - this.inMemTailList.size());
+   size--;
+   return this.inMemTailList.remove(tailIndex);
+
   } else {
    return removeInDisk(index);
   }
  }
+
  /**
   * 从磁盘中移除
   *
@@ -256,49 +301,50 @@ public class DiskCacheArrayList implements List {
   */
  private E removeInDisk(final int index) {
   E el = this.get(index);
-  int indexInDisk = index - this.inMemroyList.size();
+  int indexInDisk = index - this.inMemHeadList.size();
   try {
-   // 删除的是最后一个记录，直接将Size减1
-   if (indexInDisk == (size - this.inMemroyList.size() - 1)) {
+   // 删除的是磁盘中的最后一个记录，直接将Size减1
+   if (indexInDisk == (size - this.inMemElsSize() - 1)) {
     size--;
-    if (size == this.inMemroyList.size()) {
+    if (size == this.inMemElsSize()) {
      // 所有数据存在于内存中，将磁盘文件清空
      this.initDiskfile();
     }
     return el;
    }
    moveDiskRecordToLeft(indexInDisk + 1,
-     size - this.inMemroyList.size(), 1);
+     size - this.inMemHeadList.size(), 1);
    size--;
    return el;
   } catch (IOException e) {
-   e.printStackTrace();
+   log.error("IOException", e);
   }
   return null;
  }
+
  /**
-  * 从内存中移除
+  * 从头部列表中移除
   *
   * @param index
   * @return
   */
- private E removeInMemory(int index) {
-  E removedEl = this.inMemroyList.remove(index);
+ private E removeInHeadList(int index) {
+  E removedEl = this.inMemHeadList.remove(index);
   size--;
   // 如果磁盘文件中有数据，则将磁盘中的第一条数据迁移到内存
-  if (this.inMemroyList.size() < size) {
-   E getedEl = this.get(this.inMemroyList.size());
+  if ((this.inMemElsSize()) < size) {
+   E getedEl = this.get(this.inMemHeadList.size());
    try {
-    moveDiskRecordToLeft(1, size - this.inMemroyList.size(), 1);
-    this.inMemroyList.add(getedEl);
+    moveDiskRecordToLeft(1, size - this.inMemHeadList.size(), 1);
+    this.inMemHeadList.add(getedEl);
    } catch (IOException e) {
-    // TODO Auto-generated catch block
-    e.printStackTrace();
+    log.error("IOException", e);
     return null;
    }
   }
   return removedEl;
  }
+
  /**
   * 将二进制文件中的记录向左移动，覆盖给定的记录数
   *
@@ -334,6 +380,7 @@ public class DiskCacheArrayList implements List {
    readedBytes = fc.read(buffer);
   }
  }
+
  /**
   * @see java.nio.channels.FileChannel#force
   * @param metaData
@@ -342,49 +389,137 @@ public class DiskCacheArrayList implements List {
  public void force(boolean metaData) throws IOException {
   fc.force(metaData);
  }
+
  /**
   * 初始化磁盘文件
+  *
+  * @throws IOException
   */
- private void initDiskfile() {
-  try {
-   deleteFile();
-   createFile();
-  } catch (IOException e) {
-   // TODO Auto-generated catch block
-   e.printStackTrace();
-  }
+ private void initDiskfile() throws IOException {
+  deleteFile();
+  createFile();
  }
+
  @Override
  public int indexOf(Object o) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public int lastIndexOf(Object o) {
   throw new IllegalArgumentException("Not supported");
  }
+
  @Override
  public ListIterator listIterator() {
   throw new IllegalArgumentException("Not supported");
  }
- @Override
- public ListIterator listIterator(int index) {
-  throw new IllegalArgumentException("Not supported");
- }
+
+ /**
+  * 返回ArrayList
+  *
+  * @see java.util.List#subList(int, int)
+  */
  @Override
  public List subList(int fromIndex, int toIndex) {
-  throw new IllegalArgumentException("Not supported");
+  RangeCheck(fromIndex);
+  RangeCheck(toIndex);
+  if (fromIndex > toIndex) {
+   throw new IllegalArgumentException("fromIndex(" + fromIndex
+     + ") > toIndex(" + toIndex + ")");
+  }
+  int offsetTail = size - this.inMemTailList.size();
+  int menHeadSize = this.inMemHeadList.size();
+  List listReturn = new ArrayList(toIndex - fromIndex);
+  int indexHeadEnd = Math.min(toIndex, menHeadSize);
+  for (int i = fromIndex; i < indexHeadEnd; i++) {
+   listReturn.add(inMemHeadList.get(i));
+  }
+  if (toIndex <= menHeadSize) {
+   return listReturn;
+  }
+
+  int diskStart = this.inMemHeadList.size();
+  int diskEnd = offsetTail - 1;
+
+  if ((diskEnd <= toIndex && diskEnd >= fromIndex)
+    || (diskStart <= toIndex && diskStart >= fromIndex)) {
+   try {
+    subListInDiskElments(fromIndex, toIndex, offsetTail, listReturn);
+   } catch (IOException e) {
+    log.error("IOException", e);
+    return null;
+   }
+  }
+  if (toIndex > offsetTail) {
+   int fromTail = fromIndex - offsetTail;
+   fromTail = fromTail < 0 ? 0 : fromTail;
+   for (int i = fromTail; i < (toIndex - offsetTail); i++) {
+    listReturn.add(inMemTailList.get(i));
+   }
+  }
+  return listReturn;
  }
+
+ /**
+  * 从磁盘文件中获得子列表
+  *
+  * @param fromIndex
+  * @param toIndex
+  * @param offsetTail
+  * @return
+  * @throws IOException
+  */
+ private void subListInDiskElments(int fromIndex, int toIndex,
+   int offsetTail, List rArrayDisk) throws IOException {
+  int offsetHead = this.inMemHeadList.size();
+  int diskBeginIndex = fromIndex - offsetHead;
+  diskBeginIndex = diskBeginIndex < 0 ? 0 : diskBeginIndex;
+  int diskEndIndex = Math.min(toIndex - offsetHead, offsetTail
+    - offsetHead);
+  readFromDisk(rArrayDisk, diskBeginIndex, diskEndIndex);
+ }
+
+ /**
+  * 从磁盘数据中读取记录，并增加到给定List
+  *
+  * @param rArrayDisk
+  *            增加目标
+  * @param diskBeginIndex
+  *            开始索引，包括此条记录
+  * @param diskEndIndex
+  *            结束索引，不包括此条记录
+  * @throws IOException
+  */
+ private void readFromDisk(List rArrayDisk, int diskBeginIndex,
+   int diskEndIndex) throws IOException {
+  long posBegin = (long) this.oneElementByteSize * (long) diskBeginIndex;
+  long posEnd = (long) this.oneElementByteSize * (long) diskEndIndex;
+  ByteBuffer bufferAll = ByteBuffer.allocate((int) (posEnd - posBegin));
+  this.fc.read(bufferAll, posBegin);
+  // 将磁盘中的数据一次拷贝到ArrayList
+  int diskSize = diskEndIndex - diskBeginIndex;
+  byte[] buffEl = new byte[oneElementByteSize];
+  bufferAll.flip();
+  for (int i = 0; i < diskSize; i++) {
+   bufferAll.get(buffEl);
+   E el = this.elementArrayReaderWriter.readFromBuffer(buffEl);
+   rArrayDisk.add(el);
+  }
+ }
+
  /**
   * 删除列表数据的本地文件
   *
   * @throws IOException
   */
- private void deleteFile() throws IOException {
+ protected void deleteFile() throws IOException {
   fc.close();
   this.diskCacheFile.close();
   File f = new File(this.tempFilePath);
   f.delete();
  }
+
  /**
   * 给本地新建磁盘缓存文件
   *
@@ -392,28 +527,51 @@ public class DiskCacheArrayList implements List {
   */
  private void createFile() throws FileNotFoundException {
   diskCacheFile = new RandomAccessFile(tempFilePath, "rw");
-//  System.out.println(getDiskFileAbsolutePath());
+  // System.out.println(getDiskFileAbsolutePath());
   fc = diskCacheFile.getChannel();
  }
+
  public String getDiskFileAbsolutePath() {
   File file = new File(tempFilePath);
   return (file.getAbsolutePath());
  }
- public int inMemoryElementsSize() {
-  return inMemroyList.size();
+
+ public int inMemElsSize() {
+  return inMemHeadList.size() + inMemTailList.size();
  }
 
  @Override
  public String toString() {
-  StringBuffer sb=new StringBuffer("");
-  for(int i=0;i    sb.append(this.get(i)+",");
+  StringBuffer sb = new StringBuffer("");
+  for (int i = 0; i < size; i++) {
+   sb.append(this.get(i) + ",");
   }
-  return super.toString()+" | "+sb.toString();
+  return super.toString() + " | " + sb.toString();
  }
+
  @Override
- protected void finalize() throws Throwable {
+ public void finalize() throws Throwable {
   super.finalize();
   deleteFile();
  }
+
+ /**
+  * Trims the capacity of this ArrayList instance to be the list's
+  * current size. An application can use this operation to minimize the
+  * storage of an ArrayList instance.
+  */
+ public void trimToSize() {
+  this.inMemHeadList.trimToSize();
+  this.inMemTailList.trimToSize();
+  // TODO:磁盘文件的trim
+  // int oldCapacity = elementData.length;
+  // if (size < oldCapacity) {
+  // elementData = Arrays.copyOf(elementData, size);
+ }
+
+ @Override
+ public ListIterator listIterator(int index) {
+  // TODO Auto-generated method stub
+  return null;
+ }
 }
-  
